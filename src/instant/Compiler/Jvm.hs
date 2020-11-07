@@ -38,10 +38,12 @@ compile prg name = runIdentity
     )
 
 
+
+
 compileProgram :: Show a => Program a -> String -> ES a [String]
 compileProgram (Prog _ stmts) name = do
     instr <- mapM compileStmt stmts
-    let strings    = concat $ map snd instr
+    let strings    = foldr (.) (id) (map snd instr) []
     let stackDepth = maximum $ 0 : map fst instr
     localsNum <- gets _free
     let program =
@@ -54,52 +56,62 @@ compileProgram (Prog _ stmts) name = do
     return program
   where
     prelude n =
-        [ ".class  public " ++ n
-        , ".super  java/lang/Object"
-        , ".method public <init>()V"
-        , "aload_0"
-        , "invokespecial java/lang/Object/<init>()V"
-        , "return"
-        , ".end method"
-        , ".method public static main([Ljava/lang/String;)V"
-        ]
+        ([ ".class  public " ++ n
+         , ".super  java/lang/Object"
+         , ".method public <init>()V"
+         , "aload_0"
+         , "invokespecial java/lang/Object/<init>()V"
+         , "return"
+         , ".end method"
+         , ".method public static main([Ljava/lang/String;)V"
+         ]
+        )
 
-    postlude = ["return", ".end method"]
+    postlude = (["return", ".end method"])
 
 
-compileStmt :: Show a => Stmt a -> ES a (Integer, [String])
+compileStmt :: Show a => Stmt a -> ES a (Integer, InstrBuilder)
 compileStmt (SAss _ n e) = do
     (d, s) <- compileExp e
     ident  <- lift $ insertIfAbsent n
     let instr =
-            s ++ [(if ident <= 3 then "istore_" else "istore ") ++ (show ident)]
+            s
+                . ([ (if ident <= 3 then "istore_" else "istore ")
+                         ++ (show ident)
+                   ] ++
+                  )
     return (d, instr)
 compileStmt (SExp _ e) = do
     (d, s) <- compileExp e
     let instr = if d > 1
-            then s ++ [printStream, "swap", invokeVirtual]
-            else printStream : s ++ [invokeVirtual]
+            then s . printStream . swap . invokeVirtual
+            else printStream . s . invokeVirtual
     return ((max d 2), instr)
   where
-    printStream   = "getstatic java/lang/System/out Ljava/io/PrintStream;"
-    invokeVirtual = "invokevirtual java/io/PrintStream/println(I)V"
+    swap = (["swap"] ++)
+    printStream = (["getstatic java/lang/System/out Ljava/io/PrintStream;"] ++)
+    invokeVirtual = (["invokevirtual java/io/PrintStream/println(I)V"] ++)
 
 
-compileExp :: Show a => Exp a -> ES a (Integer, [String])
-compileExp (ExpAdd _ e1 e2) = _compileExpCommutative e1 e2 ["iadd"]
-compileExp (ExpSub _ e1 e2) = _compileExpNonCommutative e1 e2 ["isub"]
-compileExp (ExpMul _ e1 e2) = _compileExpCommutative e1 e2 ["imul"]
-compileExp (ExpDiv _ e1 e2) = _compileExpNonCommutative e1 e2 ["idiv"]
-compileExp (ExpVar p n    ) = do
+
+compileExp :: Show a => Exp a -> ES a (Integer, InstrBuilder)
+compileExp (ExpAdd _ e1 e2) = _compileExpCommutative e1 e2 "iadd"
+compileExp (ExpSub _ e1 e2) = _compileExpNonCommutative e1 e2 "isub"
+compileExp (ExpMul _ e1 e2) = _compileExpCommutative e1 e2 "imul"
+compileExp (ExpDiv _ e1 e2) = _compileExpNonCommutative e1 e2 "idiv"
+compileExp (ExpVar p ident) = do
     variableStore <- gets _dict
-    location      <- case (Map.lookup n variableStore) of
+    location      <- case (Map.lookup ident variableStore) of
         Just v  -> return v
-        Nothing -> throwError $ UnboundVariable p
+        Nothing -> throwError $ UnboundVariable p ident
     return
-        (1, [(if location <= 3 then "iload_" else "iload ") ++ (show location)])
+        ( 1
+        , ([(if location <= 3 then "iload_" else "iload ") ++ (show location)] ++
+          )
+        )
 compileExp (ExpLit p e) = do
     instr <- cmd e
-    return (1, [instr ++ show e])
+    return (1, (([instr ++ show e]) ++))
   where
     cmd e | e <= 5        = return "iconst_"
           | e <= int8MAX  = return "bipush "
@@ -108,20 +120,21 @@ compileExp (ExpLit p e) = do
           | otherwise     = throwError $ LiteralOverflow p e
 
 _compileExpCommutative
-    :: Show a => Exp a -> Exp a -> [String] -> ES a (Integer, [String])
+    :: Show a => Exp a -> Exp a -> String -> ES a (Integer, InstrBuilder)
 _compileExpCommutative e1 e2 str = do
     (d1, s1) <- compileExp e1
     (d2, s2) <- compileExp e2
-    return (_stackSize d1 d2, (if d1 > d2 then s1 ++ s2 else s2 ++ s1) ++ str)
+    return
+        (_stackSize d1 d2, (if d1 > d2 then s1 . s2 else s2 . s1) . ([str] ++))
 
 _compileExpNonCommutative
-    :: Show a => Exp a -> Exp a -> [String] -> ES a (Integer, [String])
+    :: Show a => Exp a -> Exp a -> String -> ES a (Integer, InstrBuilder)
 _compileExpNonCommutative e1 e2 str = do
     (d1, s1) <- compileExp e1
     (d2, s2) <- compileExp e2
     return
         ( _stackSize d1 d2
-        , (if d1 >= d2 then s1 ++ s2 else s2 ++ s1 ++ ["swap"]) ++ str
+        , (if d1 >= d2 then s1 . s2 else s2 . s1 . (["swap"] ++)) . ([str] ++)
         )
 
 _stackSize :: Integer -> Integer -> Integer

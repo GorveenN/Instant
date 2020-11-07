@@ -9,9 +9,7 @@ import           AbsInstant
 import           Compiler.Common
 
 type S = State Store
-type ES a  r = ExceptT (Exception a) (State Store) r
-type Instructions = [String]
-
+type ES a r = ExceptT (Exception a) (State Store) r
 data Store  = Store { _namespace   :: Set.Set Ident, _free   :: Integer } deriving (Show)
 
 nextIdentifier :: S String
@@ -28,8 +26,7 @@ addIdent n = do
 
 
 compile :: Show a => Program a -> Either (Exception a) Instructions
-compile prg =
-    runIdentity
+compile prg = runIdentity
     (evalStateT (runExceptT (compileProgram prg))
                 (Store { _namespace = Set.empty, _free = 1 })
     )
@@ -37,7 +34,7 @@ compile prg =
 
 compileProgram :: Show a => Program a -> ES a Instructions
 compileProgram (Prog _ stmts) = do
-    instr <- concat <$> mapM compileStmt stmts
+    instr <- (\x -> foldl (.) id x []) <$> mapM compileStmt stmts
     let program = prelude ++ instr ++ postlude
     return program
   where
@@ -54,48 +51,48 @@ compileProgram (Prog _ stmts) = do
 
     postlude = ["ret i32 0", "}"]
 
-compileStmt :: Show a => Stmt a -> ES a Instructions
+
+type Handle = String
+
+compileStmt :: Show a => Stmt a -> ES a InstrBuilder
 compileStmt (SAss _ ident@(Ident name) e) = do
-    namespace <- gets _namespace
+    namespace       <- gets _namespace
     (handle, instr) <- compileExp e
-    let assignInstr = [ if Set.member ident namespace then [] else (alloc name)
-           , assign handle name
-           ]
-    modify (\x->x{_namespace = Set.insert ident namespace})
-    return
-        $  instr ++ assignInstr
+    let assignInstr =
+            ([ if Set.member ident namespace then [] else (alloc name)
+             , assign handle name
+             ] ++
+            )
+    modify (\x -> x { _namespace = Set.insert ident namespace })
+    return $ instr . assignInstr
   where
     alloc name = format "%{} = alloca i32" (name)
     assign handle name = format "store i32 {}, i32* %{}" (handle, name)
 compileStmt (SExp _ e) = do
     (handle, instr) <- compileExp e
-    return $ instr ++ [format "call void @printInt(i32 {})" [handle]]
+    return $ instr . ([format "call void @printInt(i32 {})" [handle]] ++)
 
 
-type Handle = String
-type Operation = String
-
-compileExp :: Show a => Exp a -> ES a (Handle, Instructions)
+compileExp :: Show a => Exp a -> ES a (Handle, InstrBuilder)
 compileExp (ExpAdd _ e1 e2             ) = _compileExp "add" e1 e2
 compileExp (ExpSub _ e1 e2             ) = _compileExp "sub" e1 e2
 compileExp (ExpMul _ e1 e2             ) = _compileExp "mul" e1 e2
 compileExp (ExpDiv _ e1 e2             ) = _compileExp "udiv" e1 e2
 compileExp (ExpVar p ident@(Ident name)) = do
     namespace <- gets _namespace
-    when (Set.notMember ident namespace) (throwError $ UnboundVariable p)
+    when (Set.notMember ident namespace) (throwError $ UnboundVariable p ident)
     id <- lift nextIdentifier
-    return $ (id, [buildInstr name])
-    where buildInstr name = format "load i32, i32* %{}" (name)
+    return $ (id, buildInstr name)
+    where buildInstr name = ([format "load i32, i32* %{}" (name)] ++)
 compileExp (ExpLit p e) = do
     when (not $ testOverflow e) (throwError $ LiteralOverflow p e)
-    return $ (show e, [])
+    return $ (show e, id)
     where testOverflow e = e <= int32MAX
 
-_compileExp
-    :: Show a => Operation -> Exp a -> Exp a -> ES a (Handle, Instructions)
+_compileExp :: Show a => String -> Exp a -> Exp a -> ES a (Handle, InstrBuilder)
 _compileExp op e1 e2 = do
     (a1, i1) <- compileExp e1
     (a2, i2) <- compileExp e2
     id       <- lift nextIdentifier
-    return (id, i1 ++ i2 ++ [buildInstr a1 a2])
-    where buildInstr n1 n2 = format "{} i32 {}, {}" (op, n1, n2)
+    return (id, i1 . i2 . buildInstr a1 a2)
+    where buildInstr n1 n2 = ([format "{} i32 {}, {}" (op, n1, n2)] ++)
